@@ -4,7 +4,7 @@ import soundfile as sf
 from scipy import signal
 import threading
 from collections import deque
-
+from pydub import AudioSegment
 class SimpleEQ:
     """Простой 3-полосный эквалайзер"""
     def __init__(self,sample_rate):
@@ -168,7 +168,7 @@ class TimeStretch:
 class AudioPlayer:
     """Плеер с EQ + TimeStretch"""
 
-    def __init__(self,device_id=None):
+    def __init__(self, device_id):
         self.device = device_id
         self.data = None
         self.fs = None
@@ -181,22 +181,48 @@ class AudioPlayer:
         self.volume = 1.0
 
     def load(self, filename):
+        """
+        Универсальный загрузчик аудио/видео файлов.
+        Использует стратегию: Pydub (для видео/сложных) -> Soundfile (для чистых аудио).
+        """
         try:
-            self.data, self.fs = sf.read(filename, always_2d=True, dtype='float32')
+            if filename.lower().endswith(('.mp4', '.m4a', '.mov', '.avi')):
+                audio = AudioSegment.from_file(filename)
+                self.fs = audio.frame_rate
+                raw_data = np.array(audio.get_array_of_samples(), dtype=np.float32)
+
+                if audio.channels == 2:
+                    self.data = raw_data.reshape((-1, 2))
+                else:
+                    self.data = raw_data.reshape((-1, 1))
+
+                self.data /= 32768.0
+                print(f"Загружено через Pydub (видео-контейнер): {filename}")
+
+            else:
+                self.data, self.fs = sf.read(filename, always_2d=True, dtype='float32')
+                print(f"Загружено через SoundFile: {filename}")
+
+            if self.fs is None: self.fs = 44100
+            self.eq = SimpleEQ(self.fs)
+            self.timestretch = TimeStretch(self.fs)
+            self.current_frame = 0
+
         except Exception as e:
-            print(f"Ошибка soundfile: {e}. Пробую librosa...")
+            print(f"Ошибка при загрузке {filename}: {e}. Пробую Librosa...")
             import librosa
-            self.data, self.fs = librosa.load(filename, sr=None, mono=False)
-            self.data = self.data.T
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self.data, self.fs = librosa.load(filename, sr=None, mono=False)
+                self.data = self.data.T
 
-        if len(self.data) == 0:
-            print("ОШИБКА: Файл пуст или не поддерживается!")
-            return
+            self.eq = SimpleEQ(self.fs)
+            self.timestretch = TimeStretch(self.fs)
+            self.current_frame = 0
 
-        self.eq = SimpleEQ(self.fs)
-        self.timestretch = TimeStretch(self.fs)
-        self.current_frame = 0
-        print(f"Загружено: {filename}, {self.fs}Hz, Каналов: {self.data.shape[1]}")
+        if self.data is None or len(self.data) == 0:
+            raise ValueError("Файл не содержит аудиоданных или не поддерживается.")
 
     def set_eq(self, bass = None, mid = None, treble = None):
         if self.eq:
